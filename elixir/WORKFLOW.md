@@ -62,7 +62,15 @@ Instructions:
 4. This is a Java + Spring Boot project:
    - Look at Java source code in src/main/java/
    - Keep changes minimal and focused
-5. Write clean, focused commits referencing the issue number.
+5. Commit convention (AngularJS style):
+   - Format: `<type>({{ issue.identifier }}): <description>`
+   - Types: `feat` (new feature), `fix` (bug fix), `refactor`, `test`, `docs`, `chore`
+   - One logical change per commit, keep commits as small as possible
+   - Group related changes into one commit (e.g. entity + repository + service for same domain)
+   - Examples:
+     - `feat({{ issue.identifier }}): add Member entity with JPA mapping`
+     - `feat({{ issue.identifier }}): add MemberRepository and MemberService`
+     - `fix({{ issue.identifier }}): handle null email in UserService`
 6. Push the branch and create a PR:
    - `git push -u origin {{ issue.branch_name }}`
    - `gh pr create --title "{{ issue.title }}" --body "Closes {{ issue.identifier }}"`
