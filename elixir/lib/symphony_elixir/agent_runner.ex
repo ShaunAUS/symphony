@@ -4,6 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
+  alias SymphonyElixir.ClaudeCode
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
@@ -50,12 +51,52 @@ defmodule SymphonyElixir.AgentRunner do
     max_turns = Keyword.get(opts, :max_turns, Config.agent_max_turns())
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
-    with {:ok, session} <- AppServer.start_session(workspace) do
-      try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
-      after
-        AppServer.stop_session(session)
+    case Config.agent_kind() do
+      "claude_code" ->
+        run_claude_code_turns(workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+
+      _ ->
+        with {:ok, session} <- AppServer.start_session(workspace) do
+          try do
+            do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+          after
+            AppServer.stop_session(session)
+          end
+        end
+    end
+  end
+
+  defp run_claude_code_turns(workspace, issue, update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+    on_message = codex_message_handler(update_recipient, issue)
+
+    runner_result =
+      if turn_number == 1 do
+        ClaudeCode.Runner.run(workspace, prompt, issue, on_message: on_message)
+      else
+        session_id = Keyword.get(opts, :claude_session_id, "")
+        ClaudeCode.Runner.run_continuation(workspace, session_id, prompt, issue, on_message: on_message)
       end
+
+    case runner_result do
+      {:ok, %{session_id: session_id}} ->
+        Logger.info("Completed Claude Code turn for #{issue_context(issue)} turn=#{turn_number}/#{max_turns}")
+
+        case continue_with_issue?(issue, issue_state_fetcher) do
+          {:continue, refreshed_issue} when turn_number < max_turns ->
+            run_claude_code_turns(
+              workspace, refreshed_issue, update_recipient,
+              Keyword.put(opts, :claude_session_id, session_id),
+              issue_state_fetcher, turn_number + 1, max_turns
+            )
+
+          {:continue, _} -> :ok
+          {:done, _} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
