@@ -13,9 +13,9 @@ public class UserService {
         this.userRepository = userRepository;
     }
 
-    // BUG: This throws NullPointerException when user is not found
     public User findById(Long id) {
-        return userRepository.findById(id).get();
+        return userRepository.findById(id)
+                .orElseThrow(() -> new IllegalArgumentException("User not found with id: " + id));
     }
 
     public java.util.List<User> findAll() {
