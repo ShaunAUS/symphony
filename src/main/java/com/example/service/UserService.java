@@ -2,6 +2,8 @@ package com.example.service;
 
 import com.example.model.User;
 import com.example.repository.UserRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 
 @Service
@@ -20,5 +22,9 @@ public class UserService {
 
     public java.util.List<User> findAll() {
         return userRepository.findAll();
+    }
+
+    public Page<User> findAll(Pageable pageable) {
+        return userRepository.findAll(pageable);
     }
 }
