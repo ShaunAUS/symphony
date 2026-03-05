@@ -61,7 +61,11 @@ defmodule SymphonyElixir.Config do
                                  terminal_states: [
                                    type: {:list, :string},
                                    default: @default_terminal_states
-                                 ]
+                                 ],
+                                 repo: [type: {:or, [:string, nil]}, default: nil],
+                                 project_number: [type: {:or, [:non_neg_integer, nil]}, default: nil],
+                                 filter_labels: [type: {:list, :string}, default: []],
+                                 auto_label: [type: {:or, [:string, nil]}, default: nil]
                                ]
                              ],
                              polling: [
@@ -97,7 +101,8 @@ defmodule SymphonyElixir.Config do
                                  max_concurrent_agents_by_state: [
                                    type: {:map, :string, :pos_integer},
                                    default: %{}
-                                 ]
+                                 ],
+                                 kind: [type: {:or, [:string, nil]}, default: nil]
                                ]
                              ],
                              codex: [
@@ -217,6 +222,31 @@ defmodule SymphonyElixir.Config do
   @spec linear_terminal_states() :: [String.t()]
   def linear_terminal_states do
     get_in(validated_workflow_options(), [:tracker, :terminal_states])
+  end
+
+  @spec github_repo() :: String.t() | nil
+  def github_repo do
+    get_in(validated_workflow_options(), [:tracker, :repo])
+  end
+
+  @spec github_project_number() :: non_neg_integer() | nil
+  def github_project_number do
+    get_in(validated_workflow_options(), [:tracker, :project_number])
+  end
+
+  @spec github_filter_labels() :: [String.t()]
+  def github_filter_labels do
+    get_in(validated_workflow_options(), [:tracker, :filter_labels]) || []
+  end
+
+  @spec github_auto_label() :: String.t() | nil
+  def github_auto_label do
+    get_in(validated_workflow_options(), [:tracker, :auto_label])
+  end
+
+  @spec agent_kind() :: String.t() | nil
+  def agent_kind do
+    get_in(validated_workflow_options(), [:agent, :kind])
   end
 
   @spec poll_interval_ms() :: pos_integer()
@@ -390,6 +420,7 @@ defmodule SymphonyElixir.Config do
     case tracker_kind() do
       "linear" -> :ok
       "memory" -> :ok
+      "github" -> :ok
       nil -> {:error, :missing_tracker_kind}
       other -> {:error, {:unsupported_tracker_kind, other}}
     end
@@ -412,11 +443,10 @@ defmodule SymphonyElixir.Config do
   defp require_linear_project do
     case tracker_kind() do
       "linear" ->
-        if is_binary(linear_project_slug()) do
-          :ok
-        else
-          {:error, :missing_linear_project_slug}
-        end
+        if is_binary(linear_project_slug()), do: :ok, else: {:error, :missing_linear_project_slug}
+
+      "github" ->
+        if is_binary(github_repo()), do: :ok, else: {:error, :missing_github_repo}
 
       _ ->
         :ok
@@ -465,6 +495,10 @@ defmodule SymphonyElixir.Config do
     |> put_if_present(:project_slug, scalar_string_value(Map.get(section, "project_slug")))
     |> put_if_present(:active_states, csv_value(Map.get(section, "active_states")))
     |> put_if_present(:terminal_states, csv_value(Map.get(section, "terminal_states")))
+    |> put_if_present(:repo, scalar_string_value(Map.get(section, "repo")))
+    |> put_if_present(:project_number, non_negative_integer_value(Map.get(section, "project_number")))
+    |> put_if_present(:filter_labels, csv_value(Map.get(section, "filter_labels")))
+    |> put_if_present(:auto_label, scalar_string_value(Map.get(section, "auto_label")))
   end
 
   defp extract_polling_options(section) do
@@ -486,6 +520,7 @@ defmodule SymphonyElixir.Config do
       :max_concurrent_agents_by_state,
       state_limits_value(Map.get(section, "max_concurrent_agents_by_state"))
     )
+    |> put_if_present(:kind, scalar_string_value(Map.get(section, "kind")))
   end
 
   defp extract_codex_options(section) do
