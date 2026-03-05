@@ -19,7 +19,7 @@ defmodule SymphonyElixir.GitHub.Adapter do
 
   @behaviour SymphonyElixir.Tracker
 
-  alias SymphonyElixir.GitHub.{Client, Issue}
+  alias SymphonyElixir.{Config, GitHub.Client, GitHub.Issue}
 
   @default_active_states ["Todo", "In Progress"]
   @page_size 100
@@ -58,6 +58,50 @@ defmodule SymphonyElixir.GitHub.Adapter do
   mutation($subjectId: ID!, $body: String!) {
     addComment(input: {subjectId: $subjectId, body: $body}) {
       commentEdge { node { id } }
+    }
+  }
+  """
+
+  @project_field_query """
+  query($owner: String!, $repo: String!, $projectNumber: Int!) {
+    repository(owner: $owner, name: $repo) {
+      projectV2(number: $projectNumber) {
+        id
+        field(name: "Status") {
+          ... on ProjectV2SingleSelectField {
+            id
+            options { id name }
+          }
+        }
+      }
+    }
+  }
+  """
+
+  @issue_project_items_query """
+  query($nodeId: ID!) {
+    node(id: $nodeId) {
+      ... on Issue {
+        projectItems(first: 10) {
+          nodes {
+            id
+            project { id }
+          }
+        }
+      }
+    }
+  }
+  """
+
+  @update_field_mutation """
+  mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+    updateProjectV2ItemFieldValue(input: {
+      projectId: $projectId
+      itemId: $itemId
+      fieldId: $fieldId
+      value: { singleSelectOptionId: $optionId }
+    }) {
+      projectV2Item { id }
     }
   }
   """
@@ -108,8 +152,21 @@ defmodule SymphonyElixir.GitHub.Adapter do
   """
   @spec fetch_candidate_issues(keyword()) :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues(opts) when is_list(opts) do
+    filter_labels = Keyword.get(opts, :filter_labels, [])
     active = Keyword.get(opts, :active_states, @default_active_states)
-    fetch_and_filter(opts, &status_in?(&1, active))
+
+    filter_fn =
+      if filter_labels == [] do
+        &status_in?(&1, active)
+      else
+        fn {status, content} ->
+          has_label = has_any_label?(content, filter_labels)
+          not_terminal = !terminal_status?(status, Keyword.get(opts, :terminal_states, []))
+          has_label and not_terminal
+        end
+      end
+
+    fetch_and_filter(opts, filter_fn)
   end
 
   @doc """
@@ -146,20 +203,27 @@ defmodule SymphonyElixir.GitHub.Adapter do
   end
 
   @doc """
-  Moves an issue to a different board column.
-
-  TODO: Requires project item ID and field option ID lookups via the
-  `updateProjectV2ItemFieldValue` mutation. Stubbed for now.
+  Moves an issue to a different board column via the `updateProjectV2ItemFieldValue` mutation.
   """
-  @spec update_issue_state(String.t(), String.t(), keyword()) :: {:error, :not_implemented}
-  def update_issue_state(_issue_id, _state_name, _opts) do
-    # TODO: Implement via updateProjectV2ItemFieldValue mutation.
-    # This requires:
-    #   1. Looking up the project item ID for the issue
-    #   2. Looking up the field ID for the "Status" field
-    #   3. Looking up the option ID for the target column name
-    #   4. Calling the updateProjectV2ItemFieldValue mutation
-    {:error, :not_implemented}
+  @spec update_issue_state(String.t(), String.t(), keyword()) :: :ok | {:error, term()}
+  def update_issue_state(issue_id, state_name, opts) when is_binary(issue_id) and is_binary(state_name) and is_list(opts) do
+    graphql_fun = resolve_graphql_fun(opts)
+    owner = Keyword.fetch!(opts, :owner)
+    repo = Keyword.fetch!(opts, :repo)
+    project_number = Keyword.fetch!(opts, :project_number)
+
+    with {:ok, project_id, field_id, option_id} <- find_field_option(graphql_fun, owner, repo, project_number, state_name),
+         {:ok, item_id} <- find_project_item(graphql_fun, issue_id, project_id) do
+      case graphql_fun.(@update_field_mutation, %{
+        "projectId" => project_id,
+        "itemId" => item_id,
+        "fieldId" => field_id,
+        "optionId" => option_id
+      }) do
+        {:ok, _} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -235,6 +299,56 @@ defmodule SymphonyElixir.GitHub.Adapter do
     status in states
   end
 
+  defp has_any_label?(content, filter_labels) do
+    issue_labels =
+      case content do
+        %{"labels" => %{"nodes" => nodes}} when is_list(nodes) ->
+          Enum.map(nodes, &String.downcase(&1["name"] || ""))
+        _ -> []
+      end
+
+    downcased_filters = Enum.map(filter_labels, &String.downcase/1)
+    Enum.any?(issue_labels, &(&1 in downcased_filters))
+  end
+
+  defp terminal_status?(status, terminal_states) when is_binary(status) do
+    normalized = String.downcase(String.trim(status))
+    Enum.any?(terminal_states, &(String.downcase(String.trim(&1)) == normalized))
+  end
+
+  defp terminal_status?(_, _), do: false
+
+  defp find_field_option(graphql_fun, owner, repo, project_number, target_state) do
+    case graphql_fun.(@project_field_query, %{"owner" => owner, "repo" => repo, "projectNumber" => project_number}) do
+      {:ok, %{"data" => %{"repository" => %{"projectV2" => project}}}} ->
+        project_id = project["id"]
+        field = project["field"]
+        field_id = field["id"]
+        options = field["options"] || []
+
+        case Enum.find(options, fn o -> String.downcase(o["name"]) == String.downcase(target_state) end) do
+          nil -> {:error, {:status_option_not_found, target_state}}
+          option -> {:ok, project_id, field_id, option["id"]}
+        end
+
+      {:ok, unexpected} -> {:error, {:unexpected_response, unexpected}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp find_project_item(graphql_fun, issue_node_id, project_id) do
+    case graphql_fun.(@issue_project_items_query, %{"nodeId" => issue_node_id}) do
+      {:ok, %{"data" => %{"node" => %{"projectItems" => %{"nodes" => items}}}}} ->
+        case Enum.find(items, fn item -> item["project"]["id"] == project_id end) do
+          nil -> {:error, :project_item_not_found}
+          item -> {:ok, item["id"]}
+        end
+
+      {:ok, unexpected} -> {:error, {:unexpected_response, unexpected}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp resolve_graphql_fun(opts) do
     Keyword.get_lazy(opts, :graphql_fun, fn ->
       fn query, variables -> Client.graphql(query, variables, opts) end
@@ -242,13 +356,25 @@ defmodule SymphonyElixir.GitHub.Adapter do
   end
 
   defp config_opts do
-    config = Application.get_env(:symphony_elixir, :github, [])
+    repo = Config.github_repo()
+    {owner, repo_name} = parse_repo(repo)
 
     [
-      owner: Keyword.get(config, :owner),
-      repo: Keyword.get(config, :repo),
-      project_number: Keyword.get(config, :project_number),
-      active_states: Keyword.get(config, :active_states, @default_active_states)
+      owner: owner,
+      repo: repo_name,
+      project_number: Config.github_project_number(),
+      active_states: Config.linear_active_states() || @default_active_states,
+      terminal_states: Config.linear_terminal_states() || [],
+      filter_labels: Config.github_filter_labels(),
+      token: System.get_env("GITHUB_TOKEN")
     ]
+  end
+
+  defp parse_repo(nil), do: {nil, nil}
+  defp parse_repo(repo) when is_binary(repo) do
+    case String.split(repo, "/") do
+      [owner, name] -> {owner, name}
+      _ -> {nil, repo}
+    end
   end
 end
