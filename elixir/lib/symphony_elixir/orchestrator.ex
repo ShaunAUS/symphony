@@ -104,14 +104,10 @@ defmodule SymphonyElixir.Orchestrator do
         state =
           case reason do
             :normal ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; moving issue to Done")
+              move_issue_to_done(issue_id, running_entry)
 
-              state
-              |> complete_issue(issue_id)
-              |> schedule_issue_retry(issue_id, 1, %{
-                identifier: running_entry.identifier,
-                delay_type: :continuation
-              })
+              complete_issue(state, issue_id)
 
             _ ->
               Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
@@ -517,8 +513,10 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        )
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
+    use_label_filter = Config.github_filter_labels() != []
+
     issue_routable_to_worker?(issue) and
-      active_issue_state?(state_name, active_states) and
+      (use_label_filter or active_issue_state?(state_name, active_states)) and
       !terminal_issue_state?(state_name, terminal_states)
   end
 
@@ -873,6 +871,20 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
+  end
+
+  defp move_issue_to_done(issue_id, running_entry) do
+    terminal = List.first(Config.linear_terminal_states() || ["Done"])
+
+    Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+      case Tracker.update_issue_state(issue_id, terminal) do
+        :ok ->
+          Logger.info("Moved issue to #{terminal}: issue_id=#{issue_id} identifier=#{running_entry.identifier}")
+
+        {:error, reason} ->
+          Logger.warning("Failed to move issue to #{terminal}: issue_id=#{issue_id} reason=#{inspect(reason)}")
+      end
+    end)
   end
 
   defp available_slots(%State{} = state) do
