@@ -1,5 +1,6 @@
 package com.example.controller;
 
+import com.example.dto.PagedResponse;
 import com.example.model.User;
 import com.example.service.UserService;
 import org.springframework.data.domain.Page;
@@ -7,9 +8,6 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.web.bind.annotation.*;
-
-import java.util.HashMap;
-import java.util.Map;
 
 @RestController
 @RequestMapping("/api/users")
@@ -27,7 +25,7 @@ public class UserController {
     }
 
     @GetMapping
-    public Map<String, Object> getAllUsers(
+    public PagedResponse<User> getAllUsers(
             @RequestParam(defaultValue = "0") int page,
             @RequestParam(defaultValue = "20") int size,
             @RequestParam(defaultValue = "createdAt,desc") String[] sort) {
@@ -45,12 +43,11 @@ public class UserController {
         Pageable pageable = PageRequest.of(page, size, Sort.by(direction, sortField));
         Page<User> userPage = userService.findAll(pageable);
 
-        Map<String, Object> response = new HashMap<>();
-        response.put("content", userPage.getContent());
-        response.put("totalElements", userPage.getTotalElements());
-        response.put("totalPages", userPage.getTotalPages());
-        response.put("currentPage", userPage.getNumber());
-
-        return response;
+        return new PagedResponse<>(
+                userPage.getContent(),
+                userPage.getTotalElements(),
+                userPage.getTotalPages(),
+                userPage.getNumber()
+        );
     }
 }
