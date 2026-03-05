@@ -4,6 +4,8 @@ import com.example.model.User;
 import com.example.repository.UserRepository;
 import org.springframework.stereotype.Service;
 
+import java.util.NoSuchElementException;
+
 @Service
 public class UserService {
 
@@ -13,9 +15,9 @@ public class UserService {
         this.userRepository = userRepository;
     }
 
-    // BUG: This throws NullPointerException when user is not found
     public User findById(Long id) {
-        return userRepository.findById(id).get();
+        return userRepository.findById(id)
+                .orElseThrow(() -> new NoSuchElementException("User not found with id: " + id));
     }
 
     public java.util.List<User> findAll() {
